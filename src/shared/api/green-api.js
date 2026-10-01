@@ -1,165 +1,22 @@
-// GREEN-API MAX client (v3, HTTP API) + pure helpers.
-// Docs: https://green-api.com/v3/docs/api/sending/SendMessage/  (receiving: .../api/receiving/)
+// HTTP-клиент GREEN-API (MAX) — слой shared/api.
+//
+// Единственное место, которое знает про сеть: формирование URL, метод,
+// заголовки, таймауты, разбор ошибок (включая квоты тарифа «Разработчик»).
+// Ниже по слоям (entities/features/...) клиент используется как зависимость,
+// инжектируемая через createGreenApi({...}).
+//
+// Документация API: https://green-api.com/v3/docs/api/sending/SendMessage/
+
+import { normalizePhone } from "../lib/phone.js";
+import { withChatSuffix, withoutChatSuffix } from "../lib/chat-id.js";
 
 export const API_URL = "https://api.green-api.com";
 
-// MAX accepts only RF (7) and RB (375) phone numbers.
-//  8XXXXXXXXXX (RF style) -> 7XXXXXXXXXX  ("8" is the local RF trunk prefix)
-//  10 digits               -> 7XXXXXXXXXX  (local number without country code)
-//  Anything else: pass digits through as-is.
-export function normalizePhone(phone) {
-  const digits = String(phone ?? "").replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("8")) {
-    return "7" + digits.slice(1);
-  }
-  if (digits.length === 10) {
-    return "7" + digits;
-  }
-  return digits;
-}
-
-// chatId from the API may omit the "@c.us" suffix — add it back.
-export function withChatSuffix(chatId) {
-  if (!chatId) return "";
-  return chatId.includes("@") ? chatId : chatId + "@c.us";
-}
-
-export function withoutChatSuffix(chatId) {
-  return String(chatId ?? "").replace(/@\w+\.us$/, "");
-}
-
-// Parse the body of an incoming-message notification into a plain message
-// object, or return null for anything we should not display.
-export function extractTextMessage(body) {
-  if (!body || typeof body !== "object") return null;
-  if (body.typeWebhook !== "incomingMessageReceived") return null;
-  const md = body.messageData;
-  if (!md || md.typeMessage !== "textMessage") return null;
-  const text = md?.textMessageData?.textMessage;
-  if (typeof text !== "string" || !text) return null;
-  const raw = body.senderData?.chatId || "";
-  return {
-    idMessage: body.idMessage,
-    // The API sometimes omits the @c.us suffix in chatId — add it if missing.
-    chatId: raw.includes("@") ? raw : raw + "@c.us",
-    senderName: body.senderData?.senderName || "Неизвестный",
-    phone: String(body.senderData?.senderPhoneNumber ?? ""),
-    text,
-    timestamp: Number(body.timestamp) || Date.now(),
-  };
-}
-
-// receiveNotification returns either a JSON object or the literal "null"
-// (queue empty). Normalize whatever came back.
-export function normalizeNotificationBody(body) {
-  if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      return null;
-    }
-  }
-  return body && typeof body === "object" ? body : null;
-}
-
-export function appendChat(chats, chatId, title, phone = "") {
-  if (chats.some((c) => c.chatId === chatId)) return chats;
-  return [{ chatId, title, phone, messages: [] }, ...chats];
-}
-
-// Merge restored chats from sessionStorage into the in-memory list: existing
-// chats (any messages the poll already appended) win, only missing ones are
-// added. Runs on mount; never replaces what the poll has seen.
-export function mergeRestored(chats, saved) {
-  const result = [...chats];
-  for (const c of saved) {
-    if (result.some((ch) => ch.chatId === c.chatId)) continue;
-    result.push({
-      chatId: c.chatId,
-      title: c.title,
-      phone: c.phone,
-      messages: [],
-    });
-  }
-  return result;
-}
-
-export function appendIncoming(chats, message) {
-  const msg = { ...message, direction: "in", status: "received" };
-  const i = chats.findIndex((c) => c.chatId === message.chatId);
-  if (i < 0) {
-    return [
-      {
-        chatId: message.chatId,
-        title: message.senderName,
-        phone: message.phone,
-        messages: [msg],
-      },
-      ...chats,
-    ];
-  }
-  if (chats[i].messages.some((m) => m.idMessage === message.idMessage))
-    return chats;
-  const next = [...chats];
-  next[i] = { ...chats[i], messages: [...chats[i].messages, msg] };
-  return next;
-}
-
-export function appendOutgoing(chats, chatId, message) {
-  const msg = { ...message, direction: "out", status: "sending" };
-  const i = chats.findIndex((c) => c.chatId === chatId);
-  if (i < 0) {
-    return [{ chatId, title: chatId, messages: [msg] }, ...chats];
-  }
-  const next = [...chats];
-  next[i] = { ...chats[i], messages: [...chats[i].messages, msg] };
-  return next;
-}
-
-export function updateMessage(chats, chatId, idMessage, patch) {
-  return chats.map((chat) =>
-    chat.chatId !== chatId
-      ? chat
-      : {
-          ...chat,
-          messages: chat.messages.map((m) =>
-            m.idMessage === idMessage ? { ...m, ...patch } : m,
-          ),
-        },
-  );
-}
-
-// Map GetChatHistory items (newest-first) to our message shape. The app is
-// text-only, so non-text messages and empty texts are dropped.
-export function historyToMessages(items) {
-  if (!Array.isArray(items)) return [];
-  const out = [];
-  for (const it of items) {
-    if (!it || it.typeMessage !== "textMessage") continue;
-    const text = it.textMessage;
-    if (typeof text !== "string" || !text) continue;
-    out.push({
-      idMessage: it.idMessage,
-      chatId: withChatSuffix(it.chatId),
-      direction: it.type === "outgoing" ? "out" : "in",
-      status: it.type === "outgoing" ? it.statusMessage || "sent" : "received",
-      senderName: it.senderName || "",
-      text,
-      timestamp: Number(it.timestamp) || 0,
-    });
-  }
-  return out;
-}
-
-// Merge fetched history (newest-first) into a chat's existing messages:
-// dedup by idMessage (existing wins), append missing, then sort ascending by
-// timestamp. Stable sort keeps local/poll messages first on timestamp ties.
-export function mergeHistory(messages, history) {
-  const seen = new Set(messages.map((m) => m.idMessage));
-  const missing = history.filter((m) => !seen.has(m.idMessage));
-  return [...messages, ...missing].sort((a, b) => a.timestamp - b.timestamp);
-}
-
+/**
+ * Проверяет HTTP-статус и бросает человекочитаемую ошибку.
+ * @param {Response} res
+ * @param {string} action — действие, к которому относится ошибка («Отправка сообщения»)
+ */
 export function assertOk(res, action) {
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
@@ -174,6 +31,11 @@ export function assertOk(res, action) {
 
 // GREEN-API Developer tariff: 466 = monthly quota exceeded, body carries
 // per-method (invokeStatus) and per-chat (correspondentsStatus) limits.
+/**
+ * Человекочитаемое описание квоты из тела 466-ответа (пусто, если лимитов нет).
+ * @param {object} body
+ * @returns {string}
+ */
 export function quotaErrorMsg(body = {}) {
   const parts = [];
   const inv = body.invokeStatus;
@@ -187,8 +49,12 @@ export function quotaErrorMsg(body = {}) {
   return parts.join("; ");
 }
 
-// Like assertOk, but reads the body so 466 (quota) becomes a human message
-// instead of a bare status code. Must be awaited before res.json().
+/**
+ * Как assertOk, но сперва читает тело, чтобы 466 (квота) превратить в понятное
+ * сообщение, а не голый код. Должен вызываться ДО res.json().
+ * @param {Response} res
+ * @param {string} action
+ */
 export async function assertOkQuota(res, action) {
   if (res.ok) return;
   let body = null;
@@ -208,6 +74,21 @@ export async function assertOkQuota(res, action) {
   assertOk(res, action);
 }
 
+/**
+ * Создаёт клиент GREEN-API. fetchImpl инжектируется для тестов.
+ * @param {{idInstance: string, apiTokenInstance: string, apiUrl?: string}} config
+ * @param {Function} [fetchImpl]
+ * @returns {{
+ *   getStateInstance(): Promise<string>,
+ *   sendMessage(chatId, message): Promise<string>,
+ *   checkAccount(phone): Promise<string>,
+ *   getContactInfo(chatId): Promise<{chatId, name, phoneNumber}>,
+ *   getChats(): Promise<object[]>,
+ *   getChatHistory(chatId, count): Promise<object[]>,
+ *   receiveNotification(): Promise<{receiptId, body}|null>,
+ *   deleteNotification(receiptId): Promise<void>
+ * }}
+ */
 export function createGreenApi(
   { idInstance, apiTokenInstance, apiUrl = API_URL },
   fetchImpl = fetch,
@@ -388,13 +269,33 @@ export function createGreenApi(
   };
 }
 
+// receiveNotification returns either a JSON object or the literal "null"
+// (queue empty). Normalize whatever came back.
+/**
+ * Приводит тело ответа receiveNotification к объекту или null: парсит
+ * строковый JSON, в том числе завёрнутый в строку ещё раз (двойное кодирование).
+ * @param {*} body
+ * @returns {object|null}
+ */
+export function normalizeNotificationBody(body) {
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return null;
+    }
+  }
+  return body && typeof body === "object" ? body : null;
+}
+
 function friendlyNetworkError(action, err) {
   if (err?.name === "TimeoutError" || err?.name === "AbortError") {
     return new Error(
       `${action}: сервер не ответил за 20 секунд. Попробуйте ещё раз.`,
     );
   }
-  // ponytailless exception: CORS block surfaces as a TypeError("Failed to fetch").
+  // CORS-bloc surfaces as a generic TypeError("Failed to fetch") — explain it
+  // instead of showing a raw network error.
   return new Error(
     `${action}: не удалось подключиться к API. Возможно, GREEN-API блокирует запросы из браузера (CORS) — попробуйте Vite-прокси из README.`,
   );
