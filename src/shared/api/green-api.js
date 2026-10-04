@@ -8,7 +8,6 @@
 // Документация API: https://green-api.com/v3/docs/api/sending/SendMessage/
 
 import { normalizePhone } from "../lib/phone.js";
-import { withChatSuffix, withoutChatSuffix } from "../lib/chat-id.js";
 
 export const API_URL = "https://api.green-api.com";
 
@@ -93,8 +92,10 @@ export function createGreenApi(
   { idInstance, apiTokenInstance, apiUrl = API_URL },
   fetchImpl = fetch,
 ) {
+  // apiTokenInstance идёт СРАЗУ после метода; доп. сегменты (receiptId у
+  // deleteNotification) — ПОСЛЕ токена: .../deleteNotification/{token}/{receiptId}.
   const url = (method, ...parts) =>
-    `${apiUrl}/waInstance${idInstance}/${method}/${[...parts, apiTokenInstance].join("/")}`;
+    `${apiUrl}/waInstance${idInstance}/${method}/${[apiTokenInstance, ...parts].join("/")}`;
 
   return {
     async getStateInstance() {
@@ -156,7 +157,7 @@ export function createGreenApi(
       if (!data?.exist) {
         throw new Error("Этот номер не зарегистрирован в MAX.");
       }
-      return withChatSuffix(data.chatId);
+      return data.chatId;
     },
 
     // Refresh chat info (name) for a chatId, e.g. when restoring chats.
@@ -166,7 +167,7 @@ export function createGreenApi(
         res = await fetchImpl(url("getContactInfo"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chatId: withoutChatSuffix(chatId) }),
+          body: JSON.stringify({ chatId }),
           signal: AbortSignal.timeout(20000),
         });
       } catch (err) {
@@ -175,7 +176,7 @@ export function createGreenApi(
       await assertOkQuota(res, "Информация о контакте");
       const data = await res.json();
       return {
-        chatId: withChatSuffix(data.chatId || chatId),
+        chatId: data.chatId || chatId,
         name: data?.name || "",
         phoneNumber: data?.phoneNumber || 0,
       };
@@ -195,6 +196,40 @@ export function createGreenApi(
       return await res.json();
     },
 
+    // Instance settings: which notification types the instance emits and
+    // whether a custom webhookUrl is set (must be empty for HTTP-API polling).
+    async getSettings() {
+      let res;
+      try {
+        res = await fetchImpl(url("getSettings"), {
+          signal: AbortSignal.timeout(20000),
+        });
+      } catch (err) {
+        throw friendlyNetworkError("Настройки инстанса", err);
+      }
+      assertOk(res, "Настройки инстанса");
+      return await res.json();
+    },
+
+    // Enable incoming/outgoing/state notifications and clear webhookUrl so the
+    // FIFO HTTP-API queue actually receives messages (docs: «Получение
+    // уведомлений через HTTP API» — настройка инстанса обязательна).
+    async setSettings(settings) {
+      let res;
+      try {
+        res = await fetchImpl(url("setSettings"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(settings),
+          signal: AbortSignal.timeout(20000),
+        });
+      } catch (err) {
+        throw friendlyNetworkError("Настройки инстанса", err);
+      }
+      await assertOkQuota(res, "Настройки инстанса");
+      return await res.json();
+    },
+
     // Message history of a chat, newest-first (GetChatHistory returns
     // items sorted by timestamp descending). Rate limit: 1 rps.
     async getChatHistory(chatId, count = 100) {
@@ -203,7 +238,7 @@ export function createGreenApi(
         res = await fetchImpl(url("getChatHistory"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chatId: withoutChatSuffix(chatId), count }),
+          body: JSON.stringify({ chatId, count }),
           signal: AbortSignal.timeout(20000),
         });
       } catch (err) {

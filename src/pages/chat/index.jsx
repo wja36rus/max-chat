@@ -60,6 +60,11 @@ export default function ChatPage({ credentials, onLogout }) {
   const bottomRef = useRef(null);
   const sendingRef = useRef(0);
   const activeChatIdRef = useRef(null);
+  // Одноразовые фоновые эффекты (рестор, автонастройка): в StrictMode dev
+  // компонент монтируется дважды, и без этих флагов эффект запускается дважды —
+  // это бьёт по лимитам 1 зап/с (GetChatHistory/GetSettings → 429).
+  const restoreRanRef = useRef(false);
+  const configRanRef = useRef(false);
 
   // Всегда актуальный activeChatId — для фоновых задач (рестор, поллинг),
   // чтобы не тащить сам объект в замыкания/эффекты.
@@ -69,6 +74,8 @@ export default function ChatPage({ credentials, onLogout }) {
 
   // ---------- Восстановление + фоновая загрузка имени/истории ----------
   useEffect(() => {
+    if (restoreRanRef.current) return; // StrictMode: эффект уже выполнялся
+    restoreRanRef.current = true;
     const saved = loadChats(sessionStorage, credentials.idInstance);
     if (saved.length) {
       // Merge, don't replace: a chat the poll already created (incoming
@@ -80,8 +87,8 @@ export default function ChatPage({ credentials, onLogout }) {
 
     // Фон, по одному чату за раз: имя (getContactInfo / checkAccount) →
     // история (GetChatHistory, 1 зап/с → пауза 1.2 с между чатами).
-    // Все setChats идемпотентны (mergeRestored, mergeHistory), StrictMode
-    // двойной маунт безвреден.
+    // setChats идемпотентны (mergeRestored, mergeHistory); от повторного
+    // запуска при StrictMode-двойном маунте защищает restoreRanRef выше.
     (async () => {
       for (const c of saved) {
         const patch = await refreshSavedChat(api, c);
@@ -124,6 +131,30 @@ export default function ChatPage({ credentials, onLogout }) {
     if (!restored) return;
     saveChats(sessionStorage, credentials.idInstance, chats);
   }, [chats, restored, credentials.idInstance]);
+
+  // ---------- Автонастройка приёма ----------
+  // MAX отдаёт входящие в очередь только если инстанс настроен: webhookUrl
+  // пуст и включён incomingWebhook. Проверяем и включаем при входе, иначе
+  // receiveNotification вечно возвращает пусто (симптом «входящие не приходят»).
+  useEffect(() => {
+    if (configRanRef.current) return; // StrictMode: эффект уже выполнялся
+    configRanRef.current = true;
+    (async () => {
+      try {
+        const s = await api.getSettings();
+        if (s?.incomingWebhook !== "yes" || s?.webhookUrl) {
+          await api.setSettings({
+            incomingWebhook: "yes",
+            outgoingWebhook: "yes",
+            stateWebhook: "yes",
+            webhookUrl: "",
+          });
+        }
+      } catch (err) {
+        setPollError(`Не удалось настроить приём сообщений: ${err.message}`);
+      }
+    })();
+  }, [api]);
 
   // ---------- Приём сообщений: FIFO-поллинг ----------
   useNotificationPoll(api, {

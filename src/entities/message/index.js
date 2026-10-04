@@ -3,8 +3,9 @@
 //
 // Слой entities зависит только от shared. Текстовый клиент: всё, что не
 // «textMessage» или пустой текст — отбрасывается ещё на входе.
-
-import { withChatSuffix } from "../../shared/lib/chat-id.js";
+//
+// chatId в MAX — числовая строка без суффикса («10000000», «-10000000000000»),
+// поэтому @c.us здесь нигде не добавляется.
 
 /**
  * Парсит тело входящего вебхука в сообщение, пригодное для UI.
@@ -21,11 +22,9 @@ export function extractTextMessage(body) {
   if (!md || md.typeMessage !== "textMessage") return null;
   const text = md?.textMessageData?.textMessage;
   if (typeof text !== "string" || !text) return null;
-  const raw = body.senderData?.chatId || "";
   return {
     idMessage: body.idMessage,
-    // The API sometimes omits the @c.us suffix in chatId — add it if missing.
-    chatId: raw.includes("@") ? raw : raw + "@c.us",
+    chatId: body.senderData?.chatId || "",
     senderName: body.senderData?.senderName || "Неизвестный",
     phone: String(body.senderData?.senderPhoneNumber ?? ""),
     text,
@@ -48,7 +47,7 @@ export function historyToMessages(items) {
     if (typeof text !== "string" || !text) continue;
     out.push({
       idMessage: it.idMessage,
-      chatId: withChatSuffix(it.chatId),
+      chatId: it.chatId,
       direction: it.type === "outgoing" ? "out" : "in",
       status: it.type === "outgoing" ? it.statusMessage || "sent" : "received",
       senderName: it.senderName || "",

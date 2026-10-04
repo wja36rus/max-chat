@@ -139,7 +139,6 @@ src/
     ├── api/green-api.js          # HTTP-клиент GREEN-API + квоты/ошибки
     ├── lib/
     │   ├── phone.js              # normalizePhone (8→7, 10 цифр)
-    │   ├── chat-id.js            # withChatSuffix / withoutChatSuffix
     │   ├── chats-storage.js      # sessionStorage: load/save/clear
     │   └── sleep.js              # пауза между запросами
     └── hooks/use-auto-scroll.js  # автопрокрутка только активного чата
@@ -217,7 +216,7 @@ npm test
 - **Фичу chat**: сценарии «создать чат», «отправить» (успех/ошибка/пустой ввод),
   «восстановить чат» (имя+история, фолбэк на checkAccount, тихий сбой квоты) — всё
   на мок-API;
-- **Утилиты**: нормализация телефона, `@c.us`-суффиксы, sessionStorage (round-trip,
+- **Утилиты**: нормализация телефона, sessionStorage (round-trip,
   битые данные, разграничение по idInstance).
 
 ---
